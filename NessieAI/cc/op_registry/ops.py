@@ -426,6 +426,26 @@ OPS: list[OpSpec] = [
             "{jobs: [{artifact_key, mode, job_id or error, outcome, parents}], reply}",
         ),
     ),
+    _dispatch(
+        op_id="paper-reingest-start",
+        bin_name="nextseek-paper-reingest-start",
+        transport=Transport.sidecar,
+        assistant_endpoint="/nextseek_api/assistant/paper-reingest-start/",
+        gate_class=GateClass.read,
+        argv=[ArgSpec(flag="--paper", required=True), ArgSpec(flag="--project")],
+        response_envelope_fields=["op", "result"],
+        skill_name="nextseek",
+        skill_row=_row(
+            "**Paper reingest step 1** - for a curator who names a paper (PMID, DOI, article link, or the file "
+            "name of a PDF they attached): check the paper can be read and start a background run that reads "
+            "it, its supplement and its deposits. Returns at once; writes nothing to SEEK. If the reply says "
+            "needs_pdf, ask the curator to attach the PDF and call again with its file name. A refusal comes back "
+            "as an error whose error_type is superusers_only, feature_off, unrecognised_paper, source_unavailable, "
+            "source_not_allowed, source_bad_answer, pdf_too_large, pdf_unreadable, catalog_unavailable, "
+            "out_of_time or queue_unavailable; tell the curator its message plainly.",
+            '--paper "<pmid|doi|url|attached file name>" [--project <SEEK project id>]',
+            "{run_id, status: ok|needs_pdf|missing_sections|not_found|already_running, mode, paper, reply}"),
+    ),
     _subcmd(
         op_id="attrs",
         bin_name="nextseek-sampletype-attrs",
@@ -439,6 +459,36 @@ OPS: list[OpSpec] = [
             "Fetch structured sample-type schema.",
             "[--type] [--list]",
             "schema object(s) per SampleType",
+        ),
+    ),
+    _subcmd(
+        op_id="evidence-search",
+        bin_name="nextseek-evidence-search",
+        runner_key="evidence-search",
+        argv=[
+            ArgSpec(flag="--query"),
+            ArgSpec(flag="--id"),
+            ArgSpec(flag="--limit"),
+        ],
+        skill_name="paper-curation",
+        skill_row=_row(
+            "Search the run's evidence items by words or ID.",
+            "[--query] [--id] [--limit]",
+            "{count, items[{id, source, text}]}",
+        ),
+    ),
+    _subcmd(
+        op_id="curation-check",
+        bin_name="nextseek-curation-check",
+        runner_key="curation-check",
+        argv=[
+            ArgSpec(flag="--file"),
+        ],
+        skill_name="paper-curation",
+        skill_row=_row(
+            "Run stage 4's checks on curation.json.",
+            "[--file]",
+            "{errors, warnings, findings}",
         ),
     ),
     _subcmd(

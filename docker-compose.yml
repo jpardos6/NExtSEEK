@@ -1,6 +1,6 @@
 services:
   # The app image runs in two services (SPEC-PLAN section 1). `nextseek` is the
-  # WORKER: the nine background loops (docker/scripts/entrypoint.sh worker), the
+  # WORKER: the ten background loops (docker/scripts/entrypoint.sh worker), the
   # only migrator, no web server. It keeps the name and container_name so every
   # `docker exec nextseek manage.py ...` still works. `web` (below) is the web
   # server, which `./startup.sh rebuild` replaces without a gap.
@@ -249,6 +249,7 @@ services:
       NEXTSEEK_CC_NETWORK: dmac-cc-net
       SEEK_CONTAINER: ${INSTANCE_PREFIX:-}seek
       NEXTSEEK_CC_MAX_TURNS: ${NEXTSEEK_CC_MAX_TURNS:-50}
+      NEXTSEEK_CC_MAX_TURNS_CEILING: ${NEXTSEEK_CC_MAX_TURNS_CEILING:-300}
       NEXTSEEK_CC_MEM_LIMIT: ${NEXTSEEK_CC_MEM_LIMIT:-4g}
       NEXTSEEK_CC_NANO_CPUS: ${NEXTSEEK_CC_NANO_CPUS:-2000000000}
       NEXTSEEK_CC_PIDS_LIMIT: ${NEXTSEEK_CC_PIDS_LIMIT:-512}

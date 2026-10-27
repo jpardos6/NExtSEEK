@@ -1,0 +1,267 @@
+from types import SimpleNamespace
+
+import pytest
+
+from NessieAI.ns.paper.launch import LaunchOutcome
+from NessieAI.ns.paper.models import PaperArtifact, PaperRef, PaperText
+from NessieAI.ns.paper.start import StartRefused, start
+
+
+def _session(outcome=None, superuser=True, enabled=True, existing=None, seams="seams"):
+    made, queued = [], []
+    run = SimpleNamespace(run_id="r1", state="queued")
+    session = SimpleNamespace(
+        user=SimpleNamespace(is_superuser=superuser), enabled=lambda: enabled,
+        launch_seams=lambda paper: seams, unfinished_run=lambda doi, raw: existing,
+        create_run=lambda **kw: made.append(kw) or run, enqueue_acquire=queued.append,
+        time_left=lambda: 60.0)
+    return session, made, queued
+
+
+def _ok(mode="new", projects=()):
+    return LaunchOutcome(status="ok", paper=PaperArtifact(
+        ref=PaperRef(pmid="1", doi="10.1/x", title="T"), text=PaperText(), text_source="europepmc",
+        mode=mode, existing_project_ids=list(projects)))
+
+
+def test_non_superuser_refused():
+    session, _, _ = _session(superuser=False)
+    with pytest.raises(StartRefused) as err:
+        start("1", None, session)
+    assert err.value.error_type == "superusers_only"
+
+
+def test_feature_off_refused():
+    session, _, _ = _session(enabled=False)
+    with pytest.raises(StartRefused) as err:
+        start("1", None, session)
+    assert err.value.error_type == "feature_off"
+
+
+def test_ok_creates_and_queues(monkeypatch):
+    monkeypatch.setattr("NessieAI.ns.paper.start.launch_check", lambda raw, seams: _ok())
+    session, made, queued = _session()
+    out = start("1", 4, session)
+    assert (out["run_id"], out["status"], out["mode"]) == ("r1", "ok", "new")
+    assert made[0]["project_hint"] == 4 and made[0]["paper_input"] == "1"
+    assert [r.run_id for r in queued] == ["r1"]
+    assert "“T”" in out["reply"]
+
+
+def test_update_mode_is_said(monkeypatch):
+    monkeypatch.setattr("NessieAI.ns.paper.start.launch_check", lambda raw, seams: _ok("update", [7]))
+    out = start("1", None, _session()[0])
+    assert out["mode"] == "update" and "projects 7" in out["reply"]
+
+
+def test_needs_pdf_queues_nothing(monkeypatch):
+    monkeypatch.setattr("NessieAI.ns.paper.start.launch_check",
+                        lambda raw, seams: LaunchOutcome(status="needs_pdf", reply="Attach the PDF."))
+    session, made, queued = _session()
+    out = start("1", None, session)
+    assert (out["run_id"], out["status"], out["reply"]) == (None, "needs_pdf", "Attach the PDF.")
+    assert made == [] and queued == []
+
+
+def test_existing_run_is_returned_not_duplicated(monkeypatch):
+    monkeypatch.setattr("NessieAI.ns.paper.start.launch_check", lambda raw, seams: _ok())
+    session, made, _ = _session(existing=SimpleNamespace(run_id="old", state="paused"))
+    out = start("1", None, session)
+    assert (out["run_id"], out["status"], out["state"]) == ("old", "already_running", "paused")
+    assert out["reply"] == "A run for this paper is already in progress (paused): old."
+    assert made == []
+
+
+def test_a_start_that_loses_the_race_answers_already_running(monkeypatch):
+    from NessieAI.ns.paper.start import RunExists
+
+    monkeypatch.setattr("NessieAI.ns.paper.start.launch_check", lambda raw, seams: _ok())
+    session, _, queued = _session()
+    winner = SimpleNamespace(run_id="won", state="queued")
+
+    def lost(**kw):
+        raise RunExists(winner)
+
+    session.create_run = lost
+    out = start("1", None, session)
+    assert (out["run_id"], out["status"], out["state"]) == ("won", "already_running", "queued")
+    assert out["reply"] == "A run for this paper is already in progress (queued): won."
+    assert queued == []
+
+
+def test_unrecognised_paper(monkeypatch):
+    from NessieAI.ns.paper.identify import IdentifyError
+
+    def bad(raw, seams):
+        raise IdentifyError("could not find a PMID")
+    monkeypatch.setattr("NessieAI.ns.paper.start.launch_check", bad)
+    with pytest.raises(StartRefused) as err:
+        start("a paper", None, _session()[0])
+    assert err.value.error_type == "unrecognised_paper"
+
+
+# Every expected launch failure is a refusal with its own error_type, run through the real launch check.
+
+def _seams(routes=None, files=None, read=None, projects=None):
+    from NessieAI.ns.paper.launch import LaunchSeams
+    from NessieAI.tests.ns.paper.fakes import fetcher
+
+    f, _ = fetcher(routes or {}, retries=0)
+    files = files or {}
+    return LaunchSeams(fetcher=f, input_files=set(files), read_input_file=read or (lambda name: files[name]),
+                       doi_project_ids=projects or (lambda doi: []))
+
+
+def _refusal(paper, seams):
+    with pytest.raises(StartRefused) as err:
+        start(paper, None, _session(seams=seams)[0])
+    assert "/srv" not in str(err.value) and "secret" not in str(err.value)
+    return err.value
+
+
+def _pmid_search():
+    from NessieAI.ns.paper import europepmc
+    from NessieAI.tests.ns.paper.fakes import key
+
+    return key(f"{europepmc.BASE}/search", {"query": "EXT_ID:38000001 AND SRC:MED", "format": "json",
+                                            "resultType": "core", "pageSize": "1"})
+
+
+def test_source_down_is_source_unavailable():
+    from NessieAI.tests.ns.paper.fakes import FakeResponse
+
+    err = _refusal("38000001", _seams({_pmid_search(): FakeResponse(503)}))
+    assert err.error_type == "source_unavailable"
+    assert "www.ebi.ac.uk" in str(err) and "try again later" in str(err)
+
+
+def test_redirect_off_the_allowlist_is_source_not_allowed():
+    from NessieAI.tests.ns.paper.fakes import FakeResponse
+
+    moved = FakeResponse(302, headers={"Location": "https://elsewhere.example/secret"})
+    assert _refusal("38000001", _seams({_pmid_search(): moved})).error_type == "source_not_allowed"
+
+
+def test_oversized_attachment_is_pdf_too_large():
+    from NessieAI.ns.paper.launch import AttachmentTooLarge
+
+    def big(name):
+        raise AttachmentTooLarge(f"{name} is larger than 100 MB")
+    err = _refusal("paper.pdf", _seams(files={"paper.pdf": b""}, read=big))
+    assert err.error_type == "pdf_too_large" and "100 MB" in str(err)
+
+
+def test_attachment_that_cannot_be_opened_is_pdf_unreadable():
+    def link(name):
+        raise OSError(40, "Too many levels of symbolic links", f"/srv/users/p/u/input/{name}")
+    assert _refusal("paper.pdf", _seams(files={"paper.pdf": b""}, read=link)).error_type == "pdf_unreadable"
+
+
+def test_attachment_that_is_not_a_pdf_is_pdf_unreadable():
+    err = _refusal("paper.pdf", _seams(files={"paper.pdf": b"this is not a PDF"}))
+    assert err.error_type == "pdf_unreadable"
+
+
+def test_catalog_outage_is_catalog_unavailable():
+    from NessieAI.ns.paper import europepmc
+    from NessieAI.tests.ns.paper.fakes import FakeResponse, js, key
+    from NessieAI.tests.ns.paper.fixtures import EPMC_HIT, JATS_XML, epmc_search
+
+    def down(doi):
+        raise RuntimeError("sample catalog unreachable: db password=secret")
+    routes = {_pmid_search(): js(epmc_search([EPMC_HIT])),
+              key(f"{europepmc.BASE}/PMC10000001/fullTextXML"): FakeResponse(200, JATS_XML)}
+    err = _refusal("38000001", _seams(routes, projects=down))
+    assert err.error_type == "catalog_unavailable" and "try again later" in str(err)
+
+
+def test_out_of_time_is_refused_and_creates_nothing(monkeypatch):
+    from NessieAI.ns.paper.fetch import OutOfTime
+
+    def slow(raw, seams):
+        raise OutOfTime("no time left")
+    monkeypatch.setattr("NessieAI.ns.paper.start.launch_check", slow)
+    session, made, queued = _session()
+    with pytest.raises(StartRefused) as err:
+        start("38000001", None, session)
+    assert err.value.error_type == "out_of_time" and made == [] and queued == []
+
+
+def test_a_check_that_used_up_the_time_creates_no_run(monkeypatch):
+    monkeypatch.setattr("NessieAI.ns.paper.start.launch_check", lambda raw, seams: _ok())
+    session, made, queued = _session()
+    session.time_left = lambda: 0.5
+    with pytest.raises(StartRefused) as err:
+        start("38000001", None, session)
+    assert err.value.error_type == "out_of_time" and made == [] and queued == []
+
+
+# A source that answers, but not with something the launch check can use, is source_bad_answer.
+
+def test_a_europepmc_4xx_is_source_bad_answer():
+    from NessieAI.tests.ns.paper.fakes import FakeResponse
+
+    err = _refusal("38000001", _seams({_pmid_search(): FakeResponse(400, b"bad query")}))
+    assert err.error_type == "source_bad_answer"
+
+
+def test_a_search_answer_that_is_not_json_is_source_bad_answer():
+    from NessieAI.tests.ns.paper.fakes import FakeResponse
+
+    err = _refusal("38000001", _seams({_pmid_search(): FakeResponse(200, b"<html>maintenance</html>")}))
+    assert err.error_type == "source_bad_answer"
+
+
+def test_malformed_jats_is_source_bad_answer():
+    from NessieAI.ns.paper import europepmc
+    from NessieAI.tests.ns.paper.fakes import FakeResponse, js, key
+    from NessieAI.tests.ns.paper.fixtures import EPMC_HIT, epmc_search
+
+    routes = {_pmid_search(): js(epmc_search([EPMC_HIT])),
+              key(f"{europepmc.BASE}/PMC10000001/fullTextXML"): FakeResponse(200, b"<article><body><sec>")}
+    assert _refusal("38000001", _seams(routes)).error_type == "source_bad_answer"
+
+
+def _fulltext_routes(body: bytes):
+    from NessieAI.ns.paper import europepmc
+    from NessieAI.tests.ns.paper.fakes import FakeResponse, js, key
+    from NessieAI.tests.ns.paper.fixtures import EPMC_HIT, epmc_search
+
+    return {_pmid_search(): js(epmc_search([EPMC_HIT])),
+            key(f"{europepmc.BASE}/PMC10000001/fullTextXML"): FakeResponse(200, body)}
+
+
+@pytest.mark.parametrize("body", [
+    b"<html><body><p>Service maintenance</p></body></html>",
+    b"<article><body><sec><title>Methods</title><p>" + b"<i>" * 5000 + b"x" + b"</i>" * 5000 + b"</p></sec></body></article>",
+    b"<article>&nbsp;</article>",
+])
+def test_full_text_that_is_not_readable_jats_is_source_bad_answer(body):
+    err = _refusal("38000001", _seams(_fulltext_routes(body)))
+    assert err.error_type == "source_bad_answer" and "attach the PDF" in str(err)
+
+
+def test_jats_with_no_body_is_needs_pdf_not_a_refusal():
+    out = start("38000001", None, _session(seams=_seams(_fulltext_routes(b"<article><front/></article>")))[0])
+    assert out["status"] == "needs_pdf" and out["missing"] == ["methods", "data_availability"]
+
+
+def test_a_search_answer_of_the_wrong_shape_is_source_bad_answer():
+    from NessieAI.tests.ns.paper.fakes import js
+
+    err = _refusal("38000001", _seams({_pmid_search(): js({"resultList": {"result": ["not a record"]}})}))
+    assert err.error_type == "source_bad_answer"
+
+
+def test_bad_answer_on_the_pdf_path_does_not_ask_for_the_pdf(monkeypatch):
+    from NessieAI.ns.paper import europepmc
+    from NessieAI.tests.ns.paper.fakes import FakeResponse, key
+    from NessieAI.tests.ns.paper.fixtures import PDF_TEXT
+
+    monkeypatch.setattr("NessieAI.ns.paper.launch.pdf_to_text", lambda data: PDF_TEXT)
+    doi_q = key(f"{europepmc.BASE}/search", {"query": 'DOI:"10.1000/xyz123"', "format": "json",
+                                             "resultType": "core", "pageSize": "1"})
+    for answer in (FakeResponse(200, b"<html>maintenance</html>"), FakeResponse(400, b"bad query")):
+        err = _refusal("paper.pdf", _seams({doi_q: answer}, files={"paper.pdf": b"%PDF"}))
+        assert err.error_type == "source_bad_answer"
+        assert "attach the pdf" not in str(err).lower() and "DOI" in str(err) and "PDF" in str(err)

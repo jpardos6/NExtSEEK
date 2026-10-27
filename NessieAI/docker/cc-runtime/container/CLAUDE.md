@@ -29,11 +29,14 @@ nextseek-api-write	api-write	Refused: the server refuses every create, update an
 nextseek-assay-resolve	assay-resolve	Resolve assay titles against the selected project.
 nextseek-build-payload	build-payload	Build staged upload payloads from source rows.
 nextseek-build-upload-xlsx	build-upload-xlsx	**Reingest step 4** — render NExtSEEK 4-sheet upload workbook(s) from a harvested manifest (one per sample type) for the user to review + upload. Does NOT write to NExtSEEK; returns proposals for the service layer to record. Re-run with --answers to apply the curator's rulings on flagged cells (fill), ambiguous files (choose) and uncovered keys (place); measured cells are refused.
+nextseek-curation-check	curation-check	Run stage 4's checks on curation.json.
 nextseek-entity-extract	entity	Resolve NL terms to NExtSEEK vocabulary.
+nextseek-evidence-search	evidence-search	Search the run's evidence items by words or ID.
 nextseek-extract-text	extract	Extract text from a file.
 nextseek-generate-submission	generate-submission	Build a submission **workbook** (samplesheet/metadata **file**) for a UID set. Does NOT run/launch a pipeline.
 nextseek-graph	graph	Find and read samples from the graph (filter, lineage, attribute values), held to the user's projects; a query refused for its scope is answered through graph_search under fallback. Counts and breakdowns: nextseek-aggregate.
 nextseek-graph-schema	graph-schema	Read the deployed graph's schema live: structure, sample types, vocabulary. Never read a baked schema file instead.
+nextseek-paper-reingest-start	paper-reingest-start	**Paper reingest step 1** - for a curator who names a paper (PMID, DOI, article link, or the file name of a PDF they attached): check the paper can be read and start a background run that reads it, its supplement and its deposits. Returns at once; writes nothing to SEEK. If the reply says needs_pdf, ask the curator to attach the PDF and call again with its file name. A refusal comes back as an error whose error_type is superusers_only, feature_off, unrecognised_paper, source_unavailable, source_not_allowed, source_bad_answer, pdf_too_large, pdf_unreadable, catalog_unavailable, out_of_time or queue_unavailable; tell the curator its message plainly.
 nextseek-parse	parse	Turn an NL question into a parser plan.
 nextseek-pipeline	pipeline	**Launch** an nf-core pipeline on the cluster (Luria/Tower) — hand a composed cohort summary to the pipeline agent, which then runs the interactive launch wizard.
 nextseek-plan	plan	Multi-step planner advisor (read-only).
@@ -52,11 +55,12 @@ nextseek-validate-upload	build-validate	Fused build and validate of an upload wo
 
 ## Skills in this image
 
-The `nextseek` plugin ships two skills. Neither writes to NExtSEEK without the user's explicit yes: the `nextseek` skill's query path only reads, and it writes only through `nextseek-api-write` and `nextseek-upload-reingest`, each after the confirmation its SKILL.md prescribes; the `nextseek-batch-upload` skill only builds and validates a payload for the user to inspect — it never uploads or writes. Choose the right one up front, because the choice governs the whole turn, not just its first step. Read the chosen skill's SKILL.md before acting.
+The `nextseek` plugin ships three skills. None writes to NExtSEEK without the user's explicit yes: the `nextseek` skill's query path only reads, and it writes only through `nextseek-api-write` and `nextseek-upload-reingest`, each after the confirmation its SKILL.md prescribes; the `nextseek-batch-upload` skill only builds and validates a payload for the user to inspect — it never uploads or writes. Choose the right one up front, because the choice governs the whole turn, not just its first step. Read the chosen skill's SKILL.md before acting. The third, `paper-curation`, is only for a background paper-reingest curation run, whose prompt says so and whose inputs are in `/data/input`; never use it in a chat turn.
 
 <!-- BEGIN PLAN005-GEN:skills -->
 nextseek	nextseek
 nextseek	nextseek-batch-upload
+nextseek	paper-curation
 <!-- END PLAN005-GEN:skills -->
 
 - **`nextseek`** — `skills/nextseek/SKILL.md`. Answer questions about existing NExtSEEK data (query, find, list, count, look up samples, projects, studies), **launch** an nf-core pipeline on the cluster (`nextseek-pipeline`), and **reingest** a finished pipeline run's outputs into reviewable upload workbooks (`nextseek-run-harvest` + `nextseek-build-upload-xlsx`), then upload them with `nextseek-upload-reingest` once the user confirms.

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # Two modes of one image (compose services `nextseek` and `web`):
-#   worker (default) -- the only migrator: DB probe, migrate, the batch-upload recovery and the nine background
+#   worker (default) -- the only migrator: DB probe, migrate, the batch-upload recovery and the ten background
 #                       loops. It serves nothing, so collectstatic is not its job.
 #   web              -- collectstatic, DB probe, waits for the worker's migrations (it never migrates), then the
 #                       web server. On a stop it drains: no new chat turns, running ones finish (capped), the rest
@@ -126,6 +126,8 @@ if [ "$MODE" = "web" ]; then
   }
   _drain_and_stop() {
     touch "$_turn_dir/.draining"
+    # The curation loop first: the run it holds goes back to curation_pending for the next web container.
+    [ -n "$_curation_pid" ] && kill -TERM "$_curation_pid" 2>/dev/null
     # web's stop_grace_period (300 s) minus 30 s. The drain ends up to one poll late, then end_cut_turns pays a Django
     # start; the margin covers both, so the cut messages are written before Docker's SIGKILL. The server's own stop
     # after that may be SIGKILLed at 300 s, which loses nothing.
@@ -157,6 +159,20 @@ if [ "$MODE" = "web" ]; then
   }
   rm -rf "$_turn_dir"   # a restarted container keeps /tmp: no stale flag or marker may survive the start
   mkdir -p "$_turn_dir"
+  # Paper reingest's curation loop (spec delta 1): web is the one service that reaches cc-spawner. Off unless the
+  # feature flag is on. It restarts itself after a crash rather than taking the web server down, and the drain
+  # above hands it a TERM before the server's.
+  _curation_pid=""
+  if [ "${NEXTSEEK_PAPER_REINGEST:-0}" = "1" ]; then
+    ( trap 'kill -TERM "$_c" 2>/dev/null; wait "$_c"; exit 0' TERM
+      while :; do
+        uv run --no-sync python manage.py run_paper_curation &
+        _c=$!
+        wait "$_c"
+        sleep 30
+      done ) &
+    _curation_pid=$!
+  fi
   trap _drain_and_stop TERM INT
   wait "$_server_pid"
   exit $?
@@ -170,6 +186,9 @@ esac
 # Boot recovery: no worker is running yet, so any job still STARTED/PROGRESS was killed by the restart.
 # Fail it (never re-run it) so its status page ends. Queued, not-yet-started jobs are kept.
 uv run --no-sync manage.py mark_interrupted_batch_jobs || echo "[entrypoint] mark_interrupted_batch_jobs failed; continuing" >&2
+# The same for paper reingest, before its worker starts: a run still acquiring was cut (failed, never re-run);
+# queued and paused runs get stage 1 queued again, and a duplicate message is skipped by the run's claim.
+uv run --no-sync manage.py sweep_paper_reingest_runs || echo "[entrypoint] sweep_paper_reingest_runs failed; continuing" >&2
 
 uv run --no-sync celery -A nextseek_api.batch_upload.celery_app worker \
               --loglevel=info \
@@ -182,6 +201,14 @@ uv run --no-sync celery -A nextseek_api.batch_upload.celery_app worker \
               --loglevel=info \
               -Q cc_summaries \
               --hostname=cc_summaries@%h \
+              --concurrency=1 &
+
+# Paper reingest stages (fetching the paper and its deposits, later the curation agent) get their own worker,
+# one run at a time, so they never hold up an upload or each other.
+uv run --no-sync celery -A nextseek_api.batch_upload.celery_app worker \
+              --loglevel=info \
+              -Q paper_reingest \
+              --hostname=paper_reingest@%h \
               --concurrency=1 &
 
 # The beat that queues the periodic jobs in celery_app.py (summary sweep, stuck-turn reaper, session clean-up).

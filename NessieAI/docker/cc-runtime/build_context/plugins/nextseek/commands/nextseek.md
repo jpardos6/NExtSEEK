@@ -16,11 +16,14 @@ nextseek-api-write	api-write	sidecar
 nextseek-assay-resolve	assay-resolve	local_subcommand
 nextseek-build-payload	build-payload	local_subcommand
 nextseek-build-upload-xlsx	build-upload-xlsx	sidecar
+nextseek-curation-check	curation-check	local_subcommand
 nextseek-entity-extract	entity	sidecar
+nextseek-evidence-search	evidence-search	local_subcommand
 nextseek-extract-text	extract	local_subcommand
 nextseek-generate-submission	generate-submission	sidecar
 nextseek-graph	graph	sidecar
 nextseek-graph-schema	graph-schema	sidecar
+nextseek-paper-reingest-start	paper-reingest-start	sidecar
 nextseek-parse	parse	sidecar
 nextseek-pipeline	pipeline	viewset
 nextseek-plan	plan	viewset

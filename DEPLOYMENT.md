@@ -33,8 +33,8 @@ No service is profile-gated: `docker compose ps` shows the whole stack, and
 
 | Service | Image | Host port | Network(s) | Role |
 |---|---|---|---|---|
-| `nextseek` (the worker) | built from root `Dockerfile` | none | default | The background runtimes that run app code, no web server: Celery worker for `batch_upload`, Celery worker for `attribute_mutations`, the beat, the outbox dispatcher, the sync-recovery loop, the assay-registration and share drains and the graph sync. It is the only service that runs `migrate`, and it holds no Docker socket. One `wait -n`, so any of them exiting restarts the container. Healthchecked by `docker/scripts/attribute_runtime_healthcheck.py app`. Keeps the name `nextseek`, so every `docker exec nextseek ...` works |
-| `web` | the `nextseek` image (no second build) | none (internal :8000) | default + laya-net + dmac-spawner-net | The web server (daphne, or gunicorn via `NEXTSEEK_SERVER`) and the chat turn. No `container_name`: compose names it `nextseek-web-N`, so a rebuild can run two and swap them (§3.3). Holds no Docker socket (it reaches Docker only through `cc-spawner`), the Luria key and ssh volume, and `dmac-cc-users`. Healthcheck: `GET /login/` answers 200. `stop_grace_period: 5m` |
+| `nextseek` (the worker) | built from root `Dockerfile` | none | default | The background runtimes that run app code, no web server: Celery workers for `batch_upload`, `cc_summaries`, `paper_reingest` and `attribute_mutations`, the beat, the outbox dispatcher, the sync-recovery loop, the assay-registration and share drains and the graph sync. It is the only service that runs `migrate`, and it holds no Docker socket. One `wait -n`, so any of them exiting restarts the container. Healthchecked by `docker/scripts/attribute_runtime_healthcheck.py app`. Keeps the name `nextseek`, so every `docker exec nextseek ...` works |
+| `web` | the `nextseek` image (no second build) | none (internal :8000) | default + laya-net + dmac-spawner-net | The web server (daphne, or gunicorn via `NEXTSEEK_SERVER`), the chat turn, and, when `NEXTSEEK_PAPER_REINGEST=1`, the paper curation loop (`manage.py run_paper_curation`, "Paper reingest worker" below). No `container_name`: compose names it `nextseek-web-N`, so a rebuild can run two and swap them (§3.3). Holds no Docker socket (it reaches Docker only through `cc-spawner`), the Luria key and ssh volume, and `dmac-cc-users`. Healthcheck: `GET /login/` answers 200. `stop_grace_period: 5m` |
 | `cc-spawner` | built from `docker/cc-spawner/` | none | dmac-spawner-net (internal) | Starts Container-CC turns and runs the SEEK admin scripts for `web`, behind a token. The only holder of the Docker socket (a repo guard keeps it so); read-only, all capabilities dropped. `web` reaches it at `NEXTSEEK_SPAWNER_URL`, which has no off switch |
 | `nextseek_nginx` | `nginx:${NGINX_IMAGE_TAG:-1.31.2}` | `127.0.0.1:${NEXTSEEK_PORT:-8000}` | default **+ dmac-cc-net** | static files + reverse proxy to the `web` service (or, during a swap, to the one container `docker/nginx-upstream/pin.conf` names); the **only dual-homed** service |
 | `db` | `mysql:8.0` | `127.0.0.1:3306` | default | two schemas: `dmac` (NExtSEEK) + `seek_production` (SEEK) |
@@ -417,6 +417,7 @@ exits non-zero rather than blocking on a question nobody can answer.
 | `docker/nextseek.env` / `dmac/local_settings.py` (config only) | no build: `docker compose up -d --no-deps --force-recreate nextseek web` |
 | `NessieAI/docker/bedrock-proxy/**` or its secret env | `./startup.sh rebuild --component bedrock-proxy` |
 | `NessieAI/docker/ns-sidecar/**` | `./startup.sh rebuild --component nextseek-sidecar` |
+| `docker/cc-spawner/**` | `./startup.sh rebuild --component cc-spawner` |
 | More than one first-party image family | run each affected component, or `--component custom-stack` |
 | A Django migration (in the range) | mysqldump gate (§5.3), migration rehearsal (§3.6) → rebuild + recreate (migrate runs at boot) → verify with `showmigrations` |
 
@@ -1124,6 +1125,7 @@ entrypoint) or `internal` (set by code, never by an operator). Secrets show no d
 | `NEXTSEEK_CC_NETWORK` | nextseek.env | dmac-cc-net |  |  | Docker network a Container-CC turn joins. |
 | `DMAC_BEDROCK_PROXY_URL` | nextseek.env | http://bedrock-proxy:8080 |  |  | Bedrock proxy URL the agent calls. |
 | `NEXTSEEK_CC_MAX_TURNS` | nextseek.env, root.env | 50 |  |  | Most agent turns in one Container-CC turn. |
+| `NEXTSEEK_CC_MAX_TURNS_CEILING` | root.env | 300 |  |  | Most agent turns one cc-spawner request may ask for (a paper curation run asks for more than a chat turn). |
 | `NEXTSEEK_CC_TIMEOUT_SECONDS` | nextseek.env |  |  |  | Default length in seconds of one Container-CC turn. |
 | `NEXTSEEK_CC_MEM_LIMIT` | nextseek.env, root.env | 4g |  |  | Memory limit of the agent container. |
 | `NEXTSEEK_CC_NANO_CPUS` | nextseek.env, root.env |  |  |  | CPU limit of the agent container, in nano CPUs. |
@@ -1142,6 +1144,13 @@ entrypoint) or `internal` (set by code, never by an operator). Secrets show no d
 | `DMAC_CC_MEMORY_SWEEP_IDLE_SECONDS` | nextseek.env | 900 |  |  | Container-CC memory: idle seconds before a sweep. |
 | `DMAC_CC_MEMORY_SWEEP_MAX_PER_RUN` | nextseek.env | 20 |  |  | Container-CC memory: most sessions one sweep run summarizes, oldest first. |
 | `NEXTSEEK_CC_SUMMARY_SWEEP` | nextseek.env | 1 |  |  | Container-CC memory: 0, false or off stops the scheduled paid summary sweep (the beat keeps running). |
+| `NEXTSEEK_PAPER_REINGEST` | nextseek.env | 0 |  |  | Paper reingest: 1 lets a superuser start a run with paper-reingest-start; anything else answers feature_off. |
+| `NEXTSEEK_PAPER_REINGEST_DIR` | nextseek.env | outputs/paper_reingest |  |  | Paper reingest: folder of the runs' artifacts, one subfolder per run. It sits on the outputs bind mount unless moved. |
+| `PAPER_REINGEST_PAUSE_S` | nextseek.env | 600 |  |  | Paper reingest: seconds a paused run waits, after a source did not answer, before stage 1 tries again. |
+| `PAPER_REINGEST_PAUSE_RETRIES` | nextseek.env | 12 |  |  | Paper reingest: how many times a paused run retries before it fails at acquire. |
+| `PAPER_REINGEST_CURATION_TIMEOUT_S` | nextseek.env | 1800 |  |  | Paper reingest: seconds one curation agent run may take before the web loop stops it. Read by nextseek_api/paper_reingest/launcher.py LaunchSettings.from_env. |
+| `PAPER_REINGEST_CURATION_MAX_TURNS` | nextseek.env | 200 |  |  | Paper reingest: agent turns one curation run may take (at most NEXTSEEK_CC_MAX_TURNS_CEILING). Read by nextseek_api/paper_reingest/launcher.py LaunchSettings.from_env. |
+| `PAPER_REINGEST_CURATION_BUDGET_USD` | nextseek.env | 15 |  |  | Paper reingest: model spend cap in USD for one curation agent run (at most 100). Read by nextseek_api/paper_reingest/launcher.py LaunchSettings.from_env. |
 | `DMAC_CC_MEMORY_SUMMARY_MODEL` | nextseek.env | gemini-flash |  |  | Container-CC memory: summary model. |
 | `STEP7_LLM_LEDGER` | nextseek.env |  |  |  | Container-CC: write the per-call LLM cost ledger when 1. |
 | `DJANGO_BASE_DIR` | nextseek.env | /app |  |  | App root the LLM cost ledger writes under. |
@@ -1164,7 +1173,7 @@ entrypoint) or `internal` (set by code, never by an operator). Secrets show no d
 | `NEO4J_HTTP_PORT` | root.env | 7474 |  |  | Host port of the Neo4j browser; install writes it. |
 | `NEO4J_BOLT_PORT` | root.env | 7687 |  |  | Host port of Neo4j bolt; install writes it. |
 | `NEXTSEEK_MEMORY` | root.env | 8G |  |  | Memory cap of the web container. |
-| `NEXTSEEK_WORKER_MEMORY` | root.env | 8G |  |  | Memory cap of the worker container (the nine background loops). |
+| `NEXTSEEK_WORKER_MEMORY` | root.env | 8G |  |  | Memory cap of the worker container (the ten background loops). |
 | `NEXTSEEK_DRAIN_SECONDS` | root.env | 240 |  |  | How long a stopping web container lets running chat turns finish before it cuts them. The entrypoint clamps it to web's stop_grace_period less 30 s (270) and uses 240 for a value that is not a whole number of seconds; doctor reports either. |
 | `NEXTSEEK_SPAWNER_TOKEN` | nextseek.env | secret |  |  | Token web sends to cc-spawner. Install and rebuild write it, with the same value as SPAWNER_TOKEN in docker/cc-spawner.env. |
 | `NEXTSEEK_SPAWNER_URL` | root.env | http://cc-spawner:8080 |  |  | Where web sends Container-CC turns and SEEK user ops: the cc-spawner service. Unset or empty in .env: this default. There is no direct Docker path. |
@@ -1343,6 +1352,30 @@ delays the reaper, the purge and `clearsessions`.
 The sweep runs on its own `cc_summaries` worker, so it never delays an upload. It sends idle Container-CC transcripts (already scrubbed) to the summary model: set
 `NEXTSEEK_CC_SUMMARY_SWEEP=0` in `nextseek.env` and restart the app to stop it; the rest of the beat keeps running.
 `DMAC_CC_MEMORY_SWEEP_MAX_PER_RUN` (20) bounds one run's summaries.
+
+### Paper reingest worker
+
+The app entrypoint starts a fourth Celery worker beside the `batch_upload`, `cc_summaries` and `attribute_mutations` ones: queue
+`paper_reingest`, hostname `paper_reingest@%h`, concurrency 1. It runs stage 1 of a paper reingest (fetching the paper,
+its supplement and its deposits), one run at a time, so a slow repository never holds up an upload or the summary sweep.
+It is always running; the feature itself is off until `NEXTSEEK_PAPER_REINGEST=1` is in `nextseek.env` (the app
+container reads that file at start, so recreate the app after changing it). A source that does not answer pauses the run
+and the task retries after `PAPER_REINGEST_PAUSE_S` seconds, at most `PAPER_REINGEST_PAUSE_RETRIES` times. A run's
+artifacts are files under `NEXTSEEK_PAPER_REINGEST_DIR`, on the `outputs` bind mount, so they survive a rebuild. The
+fetcher reaches only the hosts in `NessieAI/ns/paper/fetch.py` `ALLOWED_HOSTS`, over https. At boot, before this worker
+starts, `manage.py sweep_paper_reingest_runs` fails every run a restart left `acquiring` and queues stage 1 again for
+`queued` and `paused` runs; a failure of it is logged and the boot goes on. The same worker runs stage 2 (the
+context: target project, live sample types, existing records), queued when stage 1 ends; the sweep fails a run cut
+mid-stage-2 and queues stage 2 again for one waiting in `context`.
+
+Stages 3 and 4, the curation agent and its checks, run in `web`, the one service that reaches `cc-spawner`: with
+`NEXTSEEK_PAPER_REINGEST=1` its entrypoint starts `manage.py run_paper_curation`, one curation at a time per instance.
+It starts a cc-agent container with no turn pass and no login (`PAPER_REINGEST_CURATION_TIMEOUT_S`,
+`PAPER_REINGEST_CURATION_MAX_TURNS`, `PAPER_REINGEST_CURATION_BUDGET_USD`; the turn count is capped by the spawner's
+`NEXTSEEK_CC_MAX_TURNS_CEILING`). A web drain hands the run back to `curation_pending` for the next web container.
+Shipping the curation piece takes four rebuilds: app (migration 0036 and the loop), `cc-agent` (the `paper-curation`
+skill, its two ops and `_paper_curation_check.py`), `cc-spawner` (the `max_turns` field) and a recreate of `web` and
+`nextseek` after the flag changes. Operator commands and the run's states: `nextseek_api/paper_reingest/README.md`.
 
 ### Durable upload queue
 

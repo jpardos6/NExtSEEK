@@ -681,6 +681,11 @@ files = ["nextseek.env", "root.env"]
 default = "50"
 doc = "Most agent turns in one Container-CC turn."
 
+[NEXTSEEK_CC_MAX_TURNS_CEILING]
+files = ["root.env"]
+default = "300"
+doc = "Most agent turns one cc-spawner request may ask for (a paper curation run asks for more than a chat turn)."
+
 [NEXTSEEK_CC_TIMEOUT_SECONDS]
 files = ["nextseek.env"]
 doc = "Default length in seconds of one Container-CC turn."
@@ -762,6 +767,44 @@ doc = "Container-CC memory: most sessions one sweep run summarizes, oldest first
 files = ["nextseek.env"]
 default = "1"
 doc = "Container-CC memory: 0, false or off stops the scheduled paid summary sweep (the beat keeps running)."
+
+[NEXTSEEK_PAPER_REINGEST]
+files = ["nextseek.env"]
+default = "0"
+doc = "Paper reingest: 1 lets a superuser start a run with paper-reingest-start; anything else answers feature_off."
+
+[NEXTSEEK_PAPER_REINGEST_DIR]
+files = ["nextseek.env"]
+default = "outputs/paper_reingest"
+doc = "Paper reingest: folder of the runs' artifacts, one subfolder per run. It sits on the outputs bind mount unless moved."
+
+[PAPER_REINGEST_PAUSE_S]
+files = ["nextseek.env"]
+default = "600"
+doc = "Paper reingest: seconds a paused run waits, after a source did not answer, before stage 1 tries again."
+
+[PAPER_REINGEST_PAUSE_RETRIES]
+files = ["nextseek.env"]
+default = "12"
+doc = "Paper reingest: how many times a paused run retries before it fails at acquire."
+
+[PAPER_REINGEST_CURATION_TIMEOUT_S]
+files = ["nextseek.env"]
+default = "1800"
+dynamic = true
+doc = "Paper reingest: seconds one curation agent run may take before the web loop stops it. Read by nextseek_api/paper_reingest/launcher.py LaunchSettings.from_env."
+
+[PAPER_REINGEST_CURATION_MAX_TURNS]
+files = ["nextseek.env"]
+default = "200"
+dynamic = true
+doc = "Paper reingest: agent turns one curation run may take (at most NEXTSEEK_CC_MAX_TURNS_CEILING). Read by nextseek_api/paper_reingest/launcher.py LaunchSettings.from_env."
+
+[PAPER_REINGEST_CURATION_BUDGET_USD]
+files = ["nextseek.env"]
+default = "15"
+dynamic = true
+doc = "Paper reingest: model spend cap in USD for one curation agent run (at most 100). Read by nextseek_api/paper_reingest/launcher.py LaunchSettings.from_env."
 
 [DMAC_CC_MEMORY_SUMMARY_MODEL]
 files = ["nextseek.env"]
@@ -878,7 +921,7 @@ doc = "Memory cap of the web container."
 [NEXTSEEK_WORKER_MEMORY]
 files = ["root.env"]
 default = "8G"
-doc = "Memory cap of the worker container (the nine background loops)."
+doc = "Memory cap of the worker container (the ten background loops)."
 
 [NEXTSEEK_DRAIN_SECONDS]
 files = ["root.env"]
